@@ -33,7 +33,6 @@ public final class VLCKitSPMSampleBufferVideoOutput {
     public var playbackTimeProvider: (() -> TimeInterval)?
     public var subtitleOverlayProvider: SubtitleOverlayProvider?
     public var onFrameEnqueued: (() -> Void)?
-    public var onDebugEvent: ((String) -> Void)?
 
     public private(set) var isAttached = false
     public private(set) var hasEnqueuedFrame = false
@@ -56,7 +55,6 @@ public final class VLCKitSPMSampleBufferVideoOutput {
     private var frameCounter: Int64 = 0
     private var retainedOpaque: UnsafeMutableRawPointer?
     private weak var attachedMediaPlayer: AnyObject?
-    private var debugEventCounts: [String: Int] = [:]
 
     public init(
         displayLayer: AVSampleBufferDisplayLayer,
@@ -83,8 +81,6 @@ public final class VLCKitSPMSampleBufferVideoOutput {
         }
 
         let opaque = Unmanaged.passRetained(self).toOpaque()
-        VLCKitSPMActiveVideoOutputRegistry.shared.register(opaque)
-        emitDebugEvent("attach installing callbacks")
         let installed = VLCKitSPMInstallVideoCallbacks(
             mediaPlayer,
             vlcSPMVideoLockCallback,
@@ -96,7 +92,6 @@ public final class VLCKitSPMSampleBufferVideoOutput {
         )
 
         guard installed else {
-            VLCKitSPMActiveVideoOutputRegistry.shared.unregister(opaque)
             Unmanaged<VLCKitSPMSampleBufferVideoOutput>.fromOpaque(opaque).release()
             throw VLCKitSPMSampleBufferVideoOutputError.callbacksUnavailable
         }
@@ -128,19 +123,7 @@ public final class VLCKitSPMSampleBufferVideoOutput {
         reset(removingDisplayedImage: true)
 
         if let opaque {
-            VLCKitSPMActiveVideoOutputRegistry.shared.unregister(opaque)
             Unmanaged<VLCKitSPMSampleBufferVideoOutput>.fromOpaque(opaque).release()
-        }
-    }
-
-    private func emitDebugEvent(_ event: String) {
-        stateLock.lock()
-        let count = (debugEventCounts[event] ?? 0) + 1
-        debugEventCounts[event] = count
-        stateLock.unlock()
-
-        if count <= 5 || count == 10 || count == 30 || count % 120 == 0 {
-            onDebugEvent?("\(event) count=\(count)")
         }
     }
 
@@ -180,10 +163,8 @@ public final class VLCKitSPMSampleBufferVideoOutput {
         lines: UnsafeMutablePointer<CUnsignedInt>?
     ) -> CUnsignedInt {
         guard let chroma, let width, let height, let pitches, let lines else {
-            emitDebugEvent("format missing arguments")
             return 0
         }
-        emitDebugEvent("format input=\(width.pointee)x\(height.pointee)")
 
         let inputWidth = max(1, Int(width.pointee))
         let inputHeight = max(1, Int(height.pointee))
@@ -225,7 +206,6 @@ public final class VLCKitSPMSampleBufferVideoOutput {
         stateLock.lock()
         guard !slots.isEmpty else {
             stateLock.unlock()
-            emitDebugEvent("lock without slots")
             return nil
         }
         let slot = slots[nextSlotIndex]
@@ -234,16 +214,11 @@ public final class VLCKitSPMSampleBufferVideoOutput {
         stateLock.unlock()
 
         planes?[0] = bytes
-        emitDebugEvent("lock frame")
         return Unmanaged.passUnretained(slot).toOpaque()
     }
 
     fileprivate func displayFrame(pointer: UnsafeMutableRawPointer?) {
-        guard let pointer else {
-            emitDebugEvent("display nil picture")
-            return
-        }
-        emitDebugEvent("display frame")
+        guard let pointer else { return }
         let slot = Unmanaged<VideoFrameSlot>.fromOpaque(pointer).takeUnretainedValue()
 
         stateLock.lock()
@@ -253,14 +228,8 @@ public final class VLCKitSPMSampleBufferVideoOutput {
         let currentSourceSize = sourceSize
         stateLock.unlock()
 
-        guard width > 0, height > 0, pitch > 0 else {
-            emitDebugEvent("display invalid format")
-            return
-        }
-        guard let pixelBuffer = makePixelBuffer(width: width, height: height) else {
-            emitDebugEvent("display pixel buffer failed")
-            return
-        }
+        guard width > 0, height > 0, pitch > 0 else { return }
+        guard let pixelBuffer = makePixelBuffer(width: width, height: height) else { return }
 
         CVPixelBufferLockBaseAddress(pixelBuffer, [])
         if let destination = CVPixelBufferGetBaseAddress(pixelBuffer) {
@@ -391,10 +360,7 @@ public final class VLCKitSPMSampleBufferVideoOutput {
             sampleTiming: &timing,
             sampleBufferOut: &sampleBuffer
         )
-        guard result == noErr, let sampleBuffer else {
-            emitDebugEvent("enqueue sample create failed result=\(result)")
-            return
-        }
+        guard result == noErr, let sampleBuffer else { return }
 
         if let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: true),
            CFArrayGetCount(attachments) > 0 {
@@ -428,7 +394,6 @@ public final class VLCKitSPMSampleBufferVideoOutput {
                 displayLayer.flush()
             }
             displayLayer.enqueue(sampleBuffer)
-            self.emitDebugEvent("enqueue sample status=\(displayLayer.status.rawValue)")
             self.hasEnqueuedFrame = true
             self.onFrameEnqueued?()
         }
@@ -679,34 +644,6 @@ extension VLCKitSPMPictureInPictureController: AVPictureInPictureSampleBufferPla
 }
 
 @available(iOS 15.0, *)
-private final class VLCKitSPMActiveVideoOutputRegistry: @unchecked Sendable {
-    static let shared = VLCKitSPMActiveVideoOutputRegistry()
-
-    private let lock = NSLock()
-    private var latestOpaque: UnsafeMutableRawPointer?
-
-    func register(_ opaque: UnsafeMutableRawPointer) {
-        lock.lock()
-        latestOpaque = opaque
-        lock.unlock()
-    }
-
-    func unregister(_ opaque: UnsafeMutableRawPointer) {
-        lock.lock()
-        if latestOpaque == opaque {
-            latestOpaque = nil
-        }
-        lock.unlock()
-    }
-
-    func fallbackOpaque() -> UnsafeMutableRawPointer? {
-        lock.lock()
-        defer { lock.unlock() }
-        return latestOpaque
-    }
-}
-
-@available(iOS 15.0, *)
 private final class VideoFrameSlot {
     let bytes: UnsafeMutableRawPointer
 
@@ -738,12 +675,7 @@ private let vlcSPMVideoDisplayCallback: VLCKitSPMVideoDisplayCallback = { opaque
 
 @available(iOS 15.0, *)
 private let vlcSPMVideoFormatCallback: VLCKitSPMVideoFormatCallback = { opaque, chroma, width, height, pitches, lines in
-    guard let opaque else { return 0 }
-    let currentOpaque = opaque.pointee ?? VLCKitSPMActiveVideoOutputRegistry.shared.fallbackOpaque()
-    guard let currentOpaque else { return 0 }
-    if opaque.pointee == nil {
-        opaque.pointee = currentOpaque
-    }
+    guard let currentOpaque = opaque.pointee else { return 0 }
     return Unmanaged<VLCKitSPMSampleBufferVideoOutput>.fromOpaque(currentOpaque).takeUnretainedValue().configureFormat(
         opaque: opaque,
         chroma: chroma,
