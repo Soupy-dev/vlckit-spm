@@ -738,6 +738,7 @@ private let vlcSPMVideoDisplayCallback: VLCKitSPMVideoDisplayCallback = { opaque
 
 @available(iOS 15.0, *)
 private let vlcSPMVideoFormatCallback: VLCKitSPMVideoFormatCallback = { opaque, chroma, width, height, pitches, lines in
+    guard let opaque else { return 0 }
     let currentOpaque = opaque.pointee ?? VLCKitSPMActiveVideoOutputRegistry.shared.fallbackOpaque()
     guard let currentOpaque else { return 0 }
     if opaque.pointee == nil {
