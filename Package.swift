@@ -17,13 +17,29 @@ let package = Package(
     targets: [
         vlcBinary,
         .target(
-            name: "VLCKitSPM",
+            name: "VLCKitSPMObjCBridge",
             dependencies: [
                 .target(name: "VLCKit-all")
+            ],
+            publicHeadersPath: "include",
+            cSettings: [
+                .headerSearchPath("include")
+            ],
+            linkerSettings: [
+                .linkedFramework("Foundation")
+            ]),
+        .target(
+            name: "VLCKitSPM",
+            dependencies: [
+                .target(name: "VLCKit-all"),
+                .target(name: "VLCKitSPMObjCBridge")
             ], linkerSettings: [
                 .linkedFramework("QuartzCore", .when(platforms: [.iOS])),
                 .linkedFramework("CoreText", .when(platforms: [.iOS, .tvOS])),
                 .linkedFramework("AVFoundation", .when(platforms: [.iOS, .tvOS])),
+                .linkedFramework("AVKit", .when(platforms: [.iOS])),
+                .linkedFramework("CoreVideo", .when(platforms: [.iOS])),
+                .linkedFramework("UIKit", .when(platforms: [.iOS])),
                 .linkedFramework("Security", .when(platforms: [.iOS])),
                 .linkedFramework("CFNetwork", .when(platforms: [.iOS])),
                 .linkedFramework("AudioToolbox", .when(platforms: [.iOS, .tvOS])),
