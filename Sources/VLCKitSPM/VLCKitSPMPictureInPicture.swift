@@ -32,7 +32,6 @@ public final class VLCKitSPMSampleBufferVideoOutput {
 
     public var playbackTimeProvider: (() -> TimeInterval)?
     public var subtitleOverlayProvider: SubtitleOverlayProvider?
-    public var onFirstFrameEnqueued: (() -> Void)?
     public var onFrameEnqueued: (() -> Void)?
     public var onDebugEvent: ((String) -> Void)?
 
@@ -41,7 +40,6 @@ public final class VLCKitSPMSampleBufferVideoOutput {
 
     private let displayLayer: AVSampleBufferDisplayLayer
     private let stateLock = NSLock()
-    private let enqueueQueue = DispatchQueue(label: "dev.soupy.vlckitspm.sample-buffer-output.enqueue")
     private let maxRenderSize: CGSize
     private let preferredFramesPerSecond: Double
     private var slots: [VideoFrameSlot] = []
@@ -56,7 +54,6 @@ public final class VLCKitSPMSampleBufferVideoOutput {
     private var formatDescription: CMVideoFormatDescription?
     private var timebase: CMTimebase?
     private var frameCounter: Int64 = 0
-    private var didNotifyFirstFrame = false
     private var retainedOpaque: UnsafeMutableRawPointer?
     private weak var attachedMediaPlayer: AnyObject?
     private var debugEventCounts: [String: Int] = [:]
@@ -108,8 +105,6 @@ public final class VLCKitSPMSampleBufferVideoOutput {
         isAttached = true
         attachedMediaPlayer = mediaPlayer
         retainedOpaque = opaque
-        hasEnqueuedFrame = false
-        didNotifyFirstFrame = false
         stateLock.unlock()
     }
 
@@ -124,7 +119,6 @@ public final class VLCKitSPMSampleBufferVideoOutput {
         isAttached = false
         attachedMediaPlayer = nil
         retainedOpaque = nil
-        didNotifyFirstFrame = false
         stateLock.unlock()
 
         if let player {
@@ -412,18 +406,8 @@ public final class VLCKitSPMSampleBufferVideoOutput {
             )
         }
 
-        enqueueQueue.async { [weak self, displayLayer] in
+        DispatchQueue.main.async { [weak self, displayLayer] in
             guard let self else { return }
-
-            self.stateLock.lock()
-            let hasDisplayedAtLeastOneFrame = self.hasEnqueuedFrame
-            self.stateLock.unlock()
-
-            guard !hasDisplayedAtLeastOneFrame || displayLayer.isReadyForMoreMediaData else {
-                self.emitDebugEvent("enqueue dropped not ready")
-                return
-            }
-
             if displayLayer.controlTimebase == nil {
                 var newTimebase: CMTimebase?
                 if CMTimebaseCreateWithSourceClock(allocator: kCFAllocatorDefault, sourceClock: CMClockGetHostTimeClock(), timebaseOut: &newTimebase) == noErr,
@@ -436,6 +420,7 @@ public final class VLCKitSPMSampleBufferVideoOutput {
                     self.stateLock.unlock()
                 }
             } else if let timebase = displayLayer.controlTimebase {
+                CMTimebaseSetTime(timebase, time: presentationTime)
                 CMTimebaseSetRate(timebase, rate: 1.0)
             }
 
@@ -444,17 +429,7 @@ public final class VLCKitSPMSampleBufferVideoOutput {
             }
             displayLayer.enqueue(sampleBuffer)
             self.emitDebugEvent("enqueue sample status=\(displayLayer.status.rawValue)")
-            self.stateLock.lock()
             self.hasEnqueuedFrame = true
-            let shouldNotifyFirstFrame = !self.didNotifyFirstFrame
-            if shouldNotifyFirstFrame {
-                self.didNotifyFirstFrame = true
-            }
-            self.stateLock.unlock()
-
-            if shouldNotifyFirstFrame {
-                self.onFirstFrameEnqueued?()
-            }
             self.onFrameEnqueued?()
         }
     }
@@ -591,7 +566,7 @@ public final class VLCKitSPMPictureInPictureController: NSObject {
         let controller = AVPictureInPictureController(contentSource: contentSource)
         controller.delegate = self
         controller.requiresLinearPlayback = false
-        controller.canStartPictureInPictureAutomaticallyFromInline = false
+        controller.canStartPictureInPictureAutomaticallyFromInline = true
         self.controller = controller
     }
 
